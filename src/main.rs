@@ -118,6 +118,14 @@ pub fn main() -> Result<()> {
             save.write(&mut output(&io.output)?)?;
         }
         Action::TestResave(action) => {
+            /*
+            use tracing_subscriber::fmt::format::FmtSpan;
+            tracing_subscriber::fmt()
+                .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+                .with_max_level(tracing::Level::TRACE)
+                .init();
+                */
+
             let mut types = Types::new();
             for (path, t) in action.r#type {
                 types.add(path, t);
@@ -125,7 +133,7 @@ pub fn main() -> Result<()> {
 
             let mut input = std::io::Cursor::new(fs::read(action.path)?);
             let mut output = std::io::Cursor::new(vec![]);
-            Save::read_with_types(&mut input, &types)?.write(&mut output)?;
+            uesave::trace::read_with_types(&mut input, &types)?.write(&mut output)?;
             let (input, output) = (input.into_inner(), output.into_inner());
             if input != output {
                 if action.debug {
