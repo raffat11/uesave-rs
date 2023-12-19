@@ -16,9 +16,9 @@ use std::fs::File;
 use uesave::{Property, Save};
 
 let save = Save::read(&mut File::open("drg-save-test.sav")?)?;
-match save.root.properties["NumberOfGamesPlayed"] {
-    Property::Int { value, .. } => {
-        assert_eq!(2173, value);
+match save.root.properties.get(0, "NumberOfGamesPlayed") {
+    Some(Property::Int { value, .. }) => {
+        assert_eq!(2173, *value);
     }
     _ => {}
 }
@@ -132,15 +132,32 @@ fn write_string_always_trailing<W: Write>(writer: &mut W, string: &str) -> TResu
     Ok(())
 }
 
-type Properties = indexmap::IndexMap<String, Property>;
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Properties(pub Vec<((u32, String), Property)>);
+impl Properties {
+    pub fn get(&self, duplication_index: u32, name: impl AsRef<str>) -> Option<&Property> {
+        self.0.iter().find_map(|((di, n), value)| {
+            (*di == duplication_index && name.as_ref() == n).then_some(value)
+        })
+    }
+    pub fn get_mut(
+        &mut self,
+        duplication_index: u32,
+        name: impl AsRef<str>,
+    ) -> Option<&mut Property> {
+        self.0.iter_mut().find_map(|((di, n), value)| {
+            (*di == duplication_index && name.as_ref() == n).then_some(value)
+        })
+    }
+}
 
 fn read_properties_until_none<R: Read + Seek>(
     context: &Context,
     reader: &mut R,
 ) -> TResult<Properties> {
-    let mut properties = Properties::new();
+    let mut properties = Properties::default();
     while let Some((name, prop)) = read_property(context, reader)? {
-        properties.insert(name, prop);
+        properties.0.push((name, prop));
     }
     Ok(properties)
 }
@@ -148,8 +165,8 @@ fn write_properties_none_terminated<W: Write>(
     writer: &mut W,
     properties: &Properties,
 ) -> TResult<()> {
-    for p in properties {
-        write_property(p, writer)?;
+    for ((duplication_index, name), value) in &properties.0 {
+        write_property(((*duplication_index, name), value), writer)?;
     }
     write_string(writer, "None")?;
     Ok(())
@@ -158,26 +175,28 @@ fn write_properties_none_terminated<W: Write>(
 fn read_property<R: Read + Seek>(
     context: &Context,
     reader: &mut R,
-) -> TResult<Option<(String, Property)>> {
+) -> TResult<Option<((u32, String), Property)>> {
     let name = read_string(reader)?;
     if name == "None" {
         Ok(None)
     } else {
         let context = context.push(&name);
         let t = PropertyType::read(reader)?;
-        let size = reader.read_u64::<LE>()?;
+        let size = reader.read_u32::<LE>()?;
+        let duplication_index = reader.read_u32::<LE>()?;
         let value = Property::read(&context, t, size, reader)?;
-        Ok(Some((name, value)))
+        Ok(Some(((duplication_index, name), value)))
     }
 }
-fn write_property<W: Write>(prop: (&String, &Property), writer: &mut W) -> TResult<()> {
-    write_string(writer, prop.0)?;
+fn write_property<W: Write>(prop: ((u32, &String), &Property), writer: &mut W) -> TResult<()> {
+    write_string(writer, prop.0 .1)?;
     prop.1.get_type().write(writer)?;
 
     let mut buf = vec![];
     let size = prop.1.write(&mut buf)?;
 
-    writer.write_u64::<LE>(size as u64)?;
+    writer.write_u32::<LE>(size as u32)?;
+    writer.write_u32::<LE>(prop.0 .0)?;
     writer.write_all(&buf[..])?;
     Ok(())
 }
@@ -1221,7 +1240,7 @@ impl StructValue {
 impl ValueVec {
     fn read<R: Read + Seek>(
         t: &PropertyType,
-        size: u64,
+        size: u32,
         count: u32,
         reader: &mut R,
     ) -> TResult<ValueVec> {
@@ -1248,7 +1267,7 @@ impl ValueVec {
                 ValueVec::Bool(read_array(count, reader, |r| Ok(r.read_u8()? > 0))?)
             }
             PropertyType::ByteProperty => {
-                if size == count.into() {
+                if size == count {
                     ValueVec::Byte(ByteArray::Byte(read_array(count, reader, |r| {
                         Ok(r.read_u8()?)
                     })?))
@@ -1365,7 +1384,7 @@ impl ValueArray {
     fn read<R: Read + Seek>(
         context: &Context,
         t: &PropertyType,
-        size: u64,
+        size: u32,
         reader: &mut R,
     ) -> TResult<ValueArray> {
         let count = reader.read_u32::<LE>()?;
@@ -1426,7 +1445,7 @@ impl ValueSet {
         context: &Context,
         t: &PropertyType,
         st: Option<&StructType>,
-        size: u64,
+        size: u32,
         reader: &mut R,
     ) -> TResult<ValueSet> {
         let count = reader.read_u32::<LE>()?;
@@ -1597,7 +1616,7 @@ impl Property {
     fn read<R: Read + Seek>(
         context: &Context,
         t: PropertyType,
-        size: u64,
+        size: u32,
         reader: &mut R,
     ) -> TResult<Property> {
         match t {
@@ -2285,7 +2304,7 @@ mod tests {
         assert_eq!(
             read_property(&ctx, &mut reader)?,
             Some((
-                "VersionNumber".to_string(),
+                (0, "VersionNumber".to_string()),
                 Property::Int { id: None, value: 2 }
             ))
         );
@@ -2319,26 +2338,26 @@ mod tests {
         assert_eq!(
             read_property(&ctx, &mut reader)?,
             Some((
-                "VanityMasterySave".to_string(),
+                (0, "VanityMasterySave".to_string()),
                 Property::Struct {
                     id: None,
-                    value: StructValue::Struct(indexmap::IndexMap::from([
+                    value: StructValue::Struct(Properties(vec![
                         (
-                            "Level".to_string(),
+                            (0, "Level".to_string()),
                             Property::Int {
                                 id: None,
                                 value: 140,
                             }
                         ),
                         (
-                            "XP".to_string(),
+                            (0, "XP".to_string()),
                             Property::Int {
                                 id: None,
                                 value: 9018,
                             },
                         ),
                         (
-                            "HasAwardedForOldPurchases".to_string(),
+                            (0, "HasAwardedForOldPurchases".to_string()),
                             Property::Bool {
                                 id: None,
                                 value: true,
@@ -2368,7 +2387,7 @@ mod tests {
         assert_eq!(
             read_property(&ctx, &mut reader)?,
             Some((
-                "StatIndices".to_string(),
+                (0, "StatIndices".to_string()),
                 Property::Array {
                     array_type: PropertyType::IntProperty,
                     id: None,
@@ -2393,7 +2412,7 @@ mod tests {
         let property = read_property(&ctx, &mut reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        write_property((&property.0, &property.1), &mut reconstructed)?;
+        write_property(((0, &property.0 .1), &property.1), &mut reconstructed)?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     }
@@ -2412,7 +2431,7 @@ mod tests {
         let property = read_property(&ctx, &mut reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        write_property((&property.0, &property.1), &mut reconstructed)?;
+        write_property(((0, &property.0 .1), &property.1), &mut reconstructed)?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     }
@@ -2436,7 +2455,7 @@ mod tests {
         let property = read_property(&ctx, &mut reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        write_property((&property.0, &property.1), &mut reconstructed)?;
+        write_property(((0, &property.0 .1), &property.1), &mut reconstructed)?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     }
@@ -2481,7 +2500,7 @@ mod tests {
         let property = read_property(&ctx, &mut reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        write_property((&property.0, &property.1), &mut reconstructed)?;
+        write_property(((0, &property.0 .1), &property.1), &mut reconstructed)?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     }
@@ -2516,7 +2535,7 @@ mod tests {
         let property = read_property(&ctx, &mut reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        write_property((&property.0, &property.1), &mut reconstructed)?;
+        write_property(((0, &property.0 .1), &property.1), &mut reconstructed)?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     }
@@ -2664,7 +2683,7 @@ mod tests {
         let property = read_property(&ctx, &mut reader)?.unwrap();
         println!("{property:#?}");
         let mut reconstructed: Vec<u8> = vec![];
-        write_property((&property.0, &property.1), &mut reconstructed)?;
+        write_property(((0, &property.0 .1), &property.1), &mut reconstructed)?;
         assert_eq!(original, &reconstructed[..]);
         Ok(())
     }
